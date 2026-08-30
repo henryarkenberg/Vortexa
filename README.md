@@ -1,4 +1,6 @@
+<img width="1280" height="640" alt="VORTEXA" src="https://github.com/user-attachments/assets/1ba0e617-b03c-4727-be94-a2e6871b8d35" />
 # Vortexa
+
 
 ```
       ##  ##  ####  ####   ###### ###### ##  ##  ###
