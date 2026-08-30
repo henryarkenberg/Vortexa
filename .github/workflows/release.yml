@@ -22,28 +22,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release binary
         run: cargo build --release
-      - name: Package (Windows)
+      - name: Package (Windows zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist\data | Out-Null
-          Copy-Item target\release\vortexa.exe dist\vortexa.exe
-          Copy-Item LICENSE README.md dist\
-          Copy-Item data\.gitkeep dist\data\.gitkeep
-          Compress-Archive -Path dist\* -DestinationPath dist\vortexa-${{ matrix.name }}.zip
-      - name: Package (Unix)
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force pkg\data | Out-Null
+          Copy-Item -Force target\release\vortexa.exe pkg\vortexa.exe
+          Copy-Item -Force LICENSE pkg\LICENSE
+          Copy-Item -Force README.md pkg\README.md
+          Copy-Item -Force data\.gitkeep pkg\data\.gitkeep
+          Compress-Archive -Force -Path @('pkg\vortexa.exe','pkg\LICENSE','pkg\README.md','pkg\data') `
+            -DestinationPath vortexa-${{ matrix.name }}.zip
+          Get-Item vortexa-${{ matrix.name }}.zip | Select-Object Name, Length
+      - name: Package (Unix zip)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p dist/data
-          cp target/release/vortexa dist/vortexa
-          cp LICENSE README.md dist/
-          cp data/.gitkeep dist/data/.gitkeep
-          zip -r dist/vortexa-${{ matrix.name }}.zip dist
+          set -e
+          mkdir -p pkg/data
+          cp target/release/vortexa pkg/vortexa
+          cp LICENSE pkg/LICENSE
+          cp README.md pkg/README.md
+          cp data/.gitkeep pkg/data/.gitkeep
+          ( cd pkg && zip -r ../vortexa-${{ matrix.name }}.zip vortexa LICENSE README.md data )
+          ls -l vortexa-${{ matrix.name }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: vortexa-${{ matrix.name }}
-          path: dist/*.zip
+          path: vortexa-*.zip
 
   release:
     needs: build

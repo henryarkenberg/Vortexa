@@ -292,6 +292,9 @@ impl App {
             return;
         }
         self.chat_input.clear();
+        // Always scroll to whatever was just produced (an answer or an error),
+        // even when no model is loaded yet.
+        self.chat_scroll_pending = true;
         self.ensure_chat_generator();
         let generator = match self.chat_generator.as_mut() {
             Some(g) => g,
@@ -303,7 +306,6 @@ impl App {
             Ok(text) => self.chat_history.push(format!("You: {prompt}\n\n{text}")),
             Err(e) => self.chat_history.push(format!("[error] {e:#}")),
         }
-        self.chat_scroll_pending = true;
     }
 
     fn commit_edit(&mut self) {
