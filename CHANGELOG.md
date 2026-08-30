@@ -5,6 +5,41 @@ All notable changes to Vortexa are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/). This
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08 | Terminal UI era
+
+### User experience
+- Added a full-screen Ratatui terminal UI as the default `cargo run --release`
+  experience: animated main menu, live training gauge, a chat input with
+  scrolling history, a settings panel, device selector, and an about screen.
+  The older line-based menu in `ui.rs` is kept as a fallback.
+- Training now runs on a background thread and reports progress to the UI
+  through a shared `TrainProgress`, so the gauge updates in real time and you
+  can stop it with Esc (or Ctrl+C anywhere).
+- Chat auto-scrolls to the newest message; PageUp/PageDown or j/k scroll back.
+
+### Settings
+- Added persistent user settings (`settings.json`), editable from the UI and
+  reloaded on startup. Covers device, data file, training hyperparameters,
+  tokenizer, architecture, and chat options.
+- Added model-size **templates** to the Settings panel: tiny (~0.5M), small
+  (~2.8M), medium (~7M), and large (~17M). Cycling a template applies the
+  architecture at once. Editing an architecture row by hand switches the
+  label to "custom".
+
+### Flexible architecture
+- Added `--config <file.json>` to define the whole network by hand, with full
+  precedence over the individual `--d-model`/`--layers`/... flags.
+- Added ready-made presets `examples/small.json` (~0.5M) and
+  `examples/large.json` (~17M).
+
+### Engineering
+- Split the crate into a library + binary so Vortexa can be embedded in other
+  Rust projects; exposed a public API (`Config`, `BpeTokenizer`,
+  `ByteDataset`, `Vortexa`, `Generator`, `TrainArgs`, `eval`, `retention`).
+- Training stdout is silenced when the TUI is drawing, so prints never corrupt
+  the alternate screen.
+- Tests now cover TUI rendering (via TestBackend) and settings round-trip.
+
 ## [0.2.0] - 2026-08 | Publishing release
 
 ### Documentation

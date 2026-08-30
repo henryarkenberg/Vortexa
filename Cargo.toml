@@ -1,6 +1,6 @@
 [package]
 name = "vortexa"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Vortexa: a tiny byte-level/BPE RetNet language model built with Candle (CPU/GPU)"
 
