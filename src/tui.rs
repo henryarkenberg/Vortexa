@@ -162,6 +162,8 @@ impl App {
     }
 
     fn start_training(&mut self) {
+        // Re-list `data/` so the picked file matches what is actually on disk.
+        self.refresh_data_files();
         let steps = self.train_steps.trim().parse::<usize>().unwrap_or(self.settings.steps);
         let config = match &self.train_resume {
             Some(_) => config_from_checkpoint(Path::new("checkpoints")),
@@ -198,7 +200,26 @@ impl App {
         let p = progress.clone();
         let c = cancel.clone();
         self.train_handle = Some(thread::spawn(move || {
-            let _ = train::run_with_progress(args, p, c);
+            // Surface setup errors (missing data, bad config, ...) and panics
+            // so the UI shows why instead of a stuck 0/0 gauge.
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                train::run_with_progress(args, p.clone(), c)
+            }));
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let mut g = p.lock().unwrap();
+                    g.error = true;
+                    g.done = true;
+                    g.error_msg = format!("{e:#}");
+                }
+                Err(_) => {
+                    let mut g = p.lock().unwrap();
+                    g.error = true;
+                    g.done = true;
+                    g.error_msg = "training panicked unexpectedly".to_string();
+                }
+            }
         }));
         self.train_progress = progress;
         self.train_cancel = cancel;
@@ -631,19 +652,25 @@ impl App {
             .constraints([Constraint::Min(6), Constraint::Length(3)])
             .split(area);
 
-        let prog = *self.train_progress.lock().unwrap();
+        let prog = self.train_progress.lock().unwrap().clone();
         let percent = if prog.total > 0 {
             ((prog.step as f64 / prog.total as f64) * 100.0).min(100.0) as u16
         } else {
             0
         };
-        let label = format!(
-            "step {}/{}   loss {:.3}   {:.1}k tok/s",
-            prog.step,
-            prog.total,
-            prog.loss,
-            prog.tok_s / 1e3
-        );
+        let label = if prog.error {
+            "error".to_string()
+        } else if prog.total > 0 {
+            format!(
+                "step {}/{}   loss {:.3}   {:.1}k tok/s",
+                prog.step,
+                prog.total,
+                prog.loss,
+                prog.tok_s / 1e3
+            )
+        } else {
+            "preparing data...".to_string()
+        };
         f.render_widget(
             Gauge::default()
                 .block(
@@ -657,10 +684,14 @@ impl App {
             chunks[0],
         );
 
-        let status = if prog.done {
-            "Status: finished   ·   Esc to return"
+        let status = if prog.error {
+            format!("Error: {}", prog.error_msg)
+        } else if prog.done {
+            "Status: finished   ·   Esc to return".to_string()
+        } else if prog.total == 0 {
+            "Preparing dataset / tokenizer...   ·   Esc to stop".to_string()
         } else {
-            "Status: running   ·   Esc or q to stop"
+            "Status: running   ·   Esc or q to stop".to_string()
         };
         f.render_widget(
             Paragraph::new(Text::raw(status).alignment(Alignment::Center)),

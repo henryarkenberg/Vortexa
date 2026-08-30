@@ -14,18 +14,28 @@ use rand::{rngs::StdRng, SeedableRng};
 use crate::bpe::BpeTokenizer;
 
 /// Live progress reported during training, shared with a TUI front end.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TrainProgress {
     pub step: usize,
     pub total: usize,
     pub loss: f32,
     pub tok_s: f64,
     pub done: bool,
+    pub error: bool,
+    pub error_msg: String,
 }
 
 impl Default for TrainProgress {
     fn default() -> Self {
-        Self { step: 0, total: 0, loss: 0.0, tok_s: 0.0, done: false }
+        Self {
+            step: 0,
+            total: 0,
+            loss: 0.0,
+            tok_s: 0.0,
+            done: false,
+            error: false,
+            error_msg: String::new(),
+        }
     }
 }
 use crate::config::Config;
@@ -233,7 +243,10 @@ fn run_inner(
             }
             None => {
                 let raw = ByteDataset::read_bytes(&args.data)?;
-                let tok = BpeTokenizer::train(&raw, config.num_merges);
+                // Learn merges on a bounded sample so a large corpus (e.g. a
+                // 25MB Wikipedia file) does not make "preparing" take minutes.
+                let sample = &raw[..raw.len().min(2_000_000)];
+                let tok = BpeTokenizer::train(sample, config.num_merges);
                 if verbose {
                     println!(
                         "BPE tokenizer: {} merges -> vocab {}",
