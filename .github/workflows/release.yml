@@ -62,6 +62,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Remove stale assets so the release stays clean
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v0.3.0 --json assets --jq '.assets[].name' 2>/dev/null \
+            | while read -r a; do gh release delete-asset v0.3.0 "$a" --yes 2>/dev/null || true; done || true
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            LICENSE
+            README.md
+            CHANGELOG.md
