@@ -138,9 +138,10 @@ impl App {
     }
 
     fn device_name(&self) -> String {
-        device::pick_device(&self.settings.device)
-            .map(|d| device::describe(&d))
-            .unwrap_or_else(|_| self.settings.device.clone())
+        match device::pick_device(&self.settings.device) {
+            Ok(d) => device::describe(&d),
+            Err(_) => format!("{} (not available)", self.settings.device),
+        }
     }
 
     fn build_config(&self) -> Config {
@@ -845,8 +846,11 @@ impl App {
 
     fn draw_about(&mut self, f: &mut Frame) {
         let text = format!(
-            "Vortexa {}\n\nA tiny RetNet language model in Rust with Candle.\nRetention, not attention. No KV cache.\nTrain it on any text, chat with it, measure it.\n\nMIT licensed. Esc to return.",
-            self.version
+            "Vortexa {}\n\nA tiny RetNet language model in Rust with Candle.\nRetention, not attention. No KV cache.\nTrain it on any text, chat with it, measure it.\n\nBackends detected: {}\n{}device: {}\n\nMIT licensed. Esc to return.",
+            self.version,
+            device::backend_report(),
+            if device::is_gpu_available() { "" } else { "No GPU backend found (AMD GPU is not supported by Candle), using CPU.\n" },
+            self.device_name()
         );
         f.render_widget(
             Paragraph::new(Text::raw(text)).wrap(Wrap { trim: false }),

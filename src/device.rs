@@ -35,3 +35,20 @@ pub fn describe(device: &Device) -> String {
         Device::Metal(_) => "Metal".to_string(),
     }
 }
+
+/// Backends actually usable on this machine, for display.
+pub fn backend_report() -> String {
+    let mut v = vec!["CPU"];
+    if candle_core::utils::cuda_is_available() {
+        v.push("CUDA");
+    }
+    if candle_core::utils::metal_is_available() {
+        v.push("Metal");
+    }
+    v.join(" / ")
+}
+
+/// True when any GPU backend is present (CUDA or Metal).
+pub fn is_gpu_available() -> bool {
+    candle_core::utils::cuda_is_available() || candle_core::utils::metal_is_available()
+}
