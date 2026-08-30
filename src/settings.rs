@@ -83,3 +83,16 @@ impl Settings {
         Ok(())
     }
 }
+
+/// Create the folders a first install needs and a default `settings.json`.
+///
+/// Called on app startup so a fresh download (or the release zip, which ships
+/// an empty `data/`) works immediately without the user hunting for files.
+pub fn init_workspace() -> Result<()> {
+    // These are relative to the current working directory (project root).
+    std::fs::create_dir_all("data")?;
+    if !Path::new("settings.json").exists() {
+        Settings::default().save(Path::new("."))?;
+    }
+    Ok(())
+}

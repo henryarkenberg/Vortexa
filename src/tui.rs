@@ -27,15 +27,17 @@ use ratatui::widgets::{Block, BorderType, Gauge, List, ListItem, ListState, Para
 use ratatui::{Frame, Terminal};
 
 use crate::config::Config;
+use crate::datasets::{self, DATASETS, DownloadProgress};
 use crate::device;
 use crate::generate::{self, Generator};
 use crate::settings::Settings;
 use crate::train::{self, TrainArgs, TrainProgress};
 
-const MENU_ITEMS: [&str; 8] = [
+const MENU_ITEMS: [&str; 9] = [
     "Train",
     "Continue",
     "Chat / Ask",
+    "Datasets",
     "Evaluate",
     "Settings",
     "Device",
@@ -49,6 +51,7 @@ enum Screen {
     TrainForm,
     TrainRun,
     Chat,
+    Datasets,
     Eval,
     Settings,
     About,
@@ -79,6 +82,7 @@ pub struct App {
     train_steps: String,
     train_field: usize,
     train_resume: Option<PathBuf>,
+    data_files: Vec<String>,
     train_progress: Arc<Mutex<TrainProgress>>,
     train_cancel: Arc<AtomicBool>,
     train_handle: Option<thread::JoinHandle<()>>,
@@ -90,6 +94,12 @@ pub struct App {
     chat_rng: StdRng,
     chat_scroll: usize,
     chat_scroll_pending: bool,
+
+    // Datasets
+    dataset_index: usize,
+    download_progress: Arc<Mutex<DownloadProgress>>,
+    download_cancel: Arc<AtomicBool>,
+    download_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl App {
@@ -110,6 +120,7 @@ impl App {
             train_steps: "20000".to_string(),
             train_field: 0,
             train_resume: None,
+            data_files: datasets::data_files(),
             train_progress: Arc::new(Mutex::new(TrainProgress::default())),
             train_cancel: Arc::new(AtomicBool::new(false)),
             train_handle: None,
@@ -119,6 +130,10 @@ impl App {
             chat_rng: StdRng::seed_from_u64(42),
             chat_scroll: 0,
             chat_scroll_pending: false,
+            dataset_index: 0,
+            download_progress: Arc::new(Mutex::new(DownloadProgress::default())),
+            download_cancel: Arc::new(AtomicBool::new(false)),
+            download_handle: None,
         }
     }
 
@@ -190,6 +205,20 @@ impl App {
         self.screen = Screen::TrainRun;
     }
 
+    fn start_download(&mut self) {
+        let dataset = DATASETS[self.dataset_index];
+        let progress = Arc::new(Mutex::new(DownloadProgress::default()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let p = progress.clone();
+        let c = cancel.clone();
+        self.download_handle = Some(thread::spawn(move || {
+            let _ = datasets::download(&dataset, Path::new("data"), p, c);
+        }));
+        self.download_progress = progress;
+        self.download_cancel = cancel;
+        self.data_files = datasets::data_files();
+    }
+
     fn ensure_chat_generator(&mut self) {
         if self.chat_generator.is_some() {
             return;
@@ -212,29 +241,36 @@ impl App {
                     self.screen = Screen::TrainForm;
                     self.train_resume = None;
                     self.train_steps = self.settings.steps.to_string();
+                    self.refresh_data_files();
                 }
                 1 => {
                     self.screen = Screen::TrainForm;
                     self.train_resume = Some(PathBuf::from("checkpoints"));
                     self.train_steps = "5000".to_string();
+                    self.refresh_data_files();
                 }
                 2 => {
                     self.ensure_chat_generator();
                     self.screen = Screen::Chat;
                 }
-                3 => self.screen = Screen::Eval,
-                4 => {
+                3 => {
+                    self.dataset_index = 0;
+                    self.screen = Screen::Datasets;
+                }
+                4 => self.screen = Screen::Eval,
+                5 => {
                     self.settings_entries = entries_from_settings(&self.settings);
                     self.settings_selected = 0;
                     self.settings_editing = false;
                     self.screen = Screen::Settings;
                 }
-                5 => self.cycle_device(),
-                6 => self.screen = Screen::About,
+                6 => self.cycle_device(),
+                7 => self.screen = Screen::About,
                 _ => self.request_quit(),
             },
             Screen::TrainForm => self.start_training(),
             Screen::Chat => self.submit_chat(),
+            Screen::Datasets => self.start_download(),
             Screen::Settings if self.settings_editing => self.commit_edit(),
             _ => {}
         }
@@ -288,6 +324,31 @@ impl App {
         let _ = self.settings.save(Path::new("."));
     }
 
+    fn cycle_data(&mut self, dir: isize) {
+        if self.data_files.is_empty() {
+            return;
+        }
+        // The displayed value is "data/<file>"; find which entry matches.
+        let current = self
+            .train_data
+            .strip_prefix("data/")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let idx = self.data_files.iter().position(|f| *f == current).unwrap_or(0);
+        let n = self.data_files.len() as isize;
+        let next = (idx as isize + dir).rem_euclid(n) as usize;
+        self.train_data = format!("data/{}", self.data_files[next]);
+    }
+
+    fn refresh_data_files(&mut self) {
+        self.data_files = datasets::data_files();
+        if let Some(first) = self.data_files.first() {
+            if !self.data_files.contains(&self.train_data.strip_prefix("data/").unwrap_or("").to_string()) {
+                self.train_data = format!("data/{first}");
+            }
+        }
+    }
+
     fn on_key(&mut self, code: KeyCode, ctrl: bool) {
         if ctrl && code == KeyCode::Char('c') {
             self.request_quit();
@@ -307,6 +368,8 @@ impl App {
             },
             Screen::TrainForm => match code {
                 KeyCode::Tab => self.train_field = (self.train_field + 1) % 2,
+                KeyCode::Up | KeyCode::Char('k') if self.train_field == 0 => self.cycle_data(-1),
+                KeyCode::Down | KeyCode::Char('j') if self.train_field == 0 => self.cycle_data(1),
                 KeyCode::Backspace => self.backspace_train(),
                 KeyCode::Char(c) => self.typed_train(c),
                 KeyCode::Enter => self.start_training(),
@@ -334,12 +397,31 @@ impl App {
                 _ => {}
             },
             Screen::Settings => self.on_settings_key(code),
+            Screen::Datasets => match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.dataset_index = self.dataset_index.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.dataset_index = (self.dataset_index + 1).min(DATASETS.len() - 1)
+                }
+                KeyCode::Enter => self.start_download(),
+                KeyCode::Esc | KeyCode::Char('q') => self.cancel_download_and_back(),
+                _ => {}
+            },
             Screen::Eval | Screen::About => {
                 if code == KeyCode::Esc || code == KeyCode::Char('q') {
                     self.screen = Screen::Menu;
                 }
             }
         }
+    }
+
+    fn cancel_download_and_back(&mut self) {
+        self.download_cancel.store(true, Ordering::Relaxed);
+        if let Some(h) = self.download_handle.take() {
+            let _ = h.join();
+        }
+        self.screen = Screen::Menu;
     }
 
     fn on_settings_key(&mut self, code: KeyCode) {
@@ -445,6 +527,7 @@ impl App {
             Screen::TrainForm => self.draw_train_form(f),
             Screen::TrainRun => self.draw_train_run(f),
             Screen::Chat => self.draw_chat(f),
+            Screen::Datasets => self.draw_datasets(f),
             Screen::Eval => self.draw_eval(f),
             Screen::Settings => self.draw_settings(f),
             Screen::About => self.draw_about(f),
@@ -512,6 +595,11 @@ impl App {
         } else {
             (Style::default(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         };
+        let files_hint = if self.data_files.is_empty() {
+            "no .txt files in data/ yet (use the Datasets menu)".to_string()
+        } else {
+            format!("available: {}", self.data_files.join(", "))
+        };
         let lines = vec![
             Line::from(vec![
                 Span::styled("Data file: ", Style::default()),
@@ -521,6 +609,7 @@ impl App {
                 Span::styled("Steps: ", Style::default()),
                 Span::styled(self.train_steps.clone(), steps_style),
             ]),
+            Line::from(Span::raw(files_hint)),
         ];
         f.render_widget(
             Paragraph::new(Text::from(lines))
@@ -656,6 +745,60 @@ impl App {
         f.render_widget(Paragraph::new(hint), chunks[1]);
     }
 
+    fn draw_datasets(&mut self, f: &mut Frame) {
+        let area = f.size();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(7), Constraint::Length(3)])
+            .split(area);
+
+        let downloading = self.download_handle.is_some();
+        let items: Vec<ListItem> = DATASETS
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let marker = if i == self.dataset_index { "> " } else { "  " };
+                let present = Path::new("data").join(d.file).exists();
+                let tag = if present { "  [downloaded]" } else { "" };
+                ListItem::new(format!(
+                    "{marker}{:<20} {:<9} {}{}",
+                    d.name, d.size_hint, d.desc, tag
+                ))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .title(" Datasets ")
+                    .title_alignment(Alignment::Center),
+            )
+            .highlight_style(
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("");
+        let mut state = ListState::default();
+        state.select(Some(self.dataset_index));
+        f.render_stateful_widget(list, chunks[0], &mut state);
+
+        let status = if downloading {
+            let d = *self.download_progress.lock().unwrap();
+            let name = DATASETS[self.dataset_index].name;
+            if d.finished {
+                "Download complete   ·   Esc to go back".to_string()
+            } else {
+                format!(
+                    "Downloading {name} ... {:.1} / {} MB   ·   Esc to cancel",
+                    d.done as f64 / 1e6,
+                    if d.total > 0 { d.total as f64 / 1e6 } else { 0.0 }
+                )
+            }
+        } else {
+            "Enter: download to data/   ·   ↑/↓ select   ·   Esc back".to_string()
+        };
+        f.render_widget(Paragraph::new(status).alignment(Alignment::Center), chunks[1]);
+    }
+
     fn draw_eval(&mut self, f: &mut Frame) {
         let text = format!(
             "Deterministic evaluation\n\nRun this from a normal shell for the numbers:\n\n   vortexa eval --checkpoint checkpoints\n\nDevice: {}\n\nEsc to return.",
@@ -786,6 +929,10 @@ fn config_from_checkpoint(ckpt: &Path) -> Config {
 }
 
 pub fn run() -> Result<()> {
+    // Create `data/` and a default `settings.json` on first run, so a fresh
+    // install (or an unchanged release zip) works right away.
+    crate::settings::init_workspace()?;
+
     enable_raw_mode()?;
     let mut stdout: Stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -868,6 +1015,13 @@ mod tests {
             g.loss = 2.5;
             g.tok_s = 8000.0;
         }
+        assert!(render(&mut app));
+    }
+
+    #[test]
+    fn datasets_renders() {
+        let mut app = App::new();
+        app.screen = Screen::Datasets;
         assert!(render(&mut app));
     }
 

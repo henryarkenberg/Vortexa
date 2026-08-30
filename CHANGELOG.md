@@ -17,6 +17,18 @@ project uses [Semantic Versioning](https://semver.org/).
   can stop it with Esc (or Ctrl+C anywhere).
 - Chat auto-scrolls to the newest message; PageUp/PageDown or j/k scroll back.
 
+### Data & onboarding
+- Added a **Datasets** menu with a catalog of downloadable corpora (name, size,
+  capability) and a streaming download gauge into `data/`. Downloads run on a
+  background thread and can be cancelled with Esc.
+- Added support for HuggingFace dataset artifacts stored as Parquet
+  (e.g. `codelion/finewiki-10M`): the file is fetched once and a named text
+  column is decoded into a plain `.txt`, without datasets-server page limits.
+- The training screen now lists the `.txt` files in `data/` and lets you pick
+  one (cycle with j/k). An empty `data/` folder is shipped in release zips.
+- First-run setup creates the `data/` folder and a default `settings.json`
+  automatically, so a fresh install or release zip works out of the box.
+
 ### Settings
 - Added persistent user settings (`settings.json`), editable from the UI and
   reloaded on startup. Covers device, data file, training hyperparameters,

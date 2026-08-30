@@ -29,21 +29,25 @@ Run it and you get a full-screen terminal app (built with Ratatui). The main
 menu shows the VORTEXA banner, and you move with the arrow keys or j/k and
 press Enter to choose:
 
-- **Train** - enter your data file and step count, then watch a live gauge
+- **Train** - pick a `.txt` from the `data/` folder and your step count, then
+  watch a live gauge
 - **Continue** - resume training from a checkpoint
 - **Chat / Ask** - type a question, get an answer in the Q&A format you trained
+- **Datasets** - list, download (with a progress bar) and manage text corpora
+  into `data/`. Includes plain-text sources and HuggingFace dataset artifacts
+  like `codelion/finewiki-10M` (a Wikipedia corpus, decoded from Parquet
+  automatically)
 - **Evaluate** - links out to the deterministic perplexity command
-- **Settings** - edit the architecture, tokenizer, training and chat options.
-  The first row, **Model template**, cycles through size presets (tiny ~0.5M,
-  small ~2.8M, medium ~7M, large ~17M) so you can train bigger models easily.
+- **Settings** - edit the architecture, tokenizer, training and chat options
 - **Device** - cycles auto / cpu / cuda / metal
 - **About** - version and a short summary
 
-The training screen draws a real-time progress gauge with step, loss and
-tokens per second, and you stop it with Esc. The chat view auto-scrolls to
-the newest message. Your chosen settings are saved to `settings.json` and
-reloaded next time. On terminals that cannot do a full-screen TUI it falls
-back to a plain line-based menu.
+On first launch the app creates the folders it needs (an empty `data/` and a
+default `settings.json`), so a fresh download works immediately. The training
+screen draws a real-time progress gauge with step, loss and tokens per second,
+and you stop it with Esc. The chat view auto-scrolls to the newest message.
+On terminals that cannot do a full-screen TUI it falls back to a plain
+line-based menu.
 
 ## Install
 
@@ -290,7 +294,7 @@ For the design story and the full build plan, read
 - Package a Windows release zip: `powershell scripts\package-release.ps1`
 
 Releases with prebuilt binaries are built automatically by GitHub Actions
-when you push a tag like `v0.2.0`. See `.github/workflows/release.yml`.
+when you push a tag like `v0.3.0`. See `.github/workflows/release.yml`.
 
 ## License
 

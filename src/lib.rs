@@ -17,6 +17,7 @@
 pub mod bpe;
 pub mod config;
 pub mod data;
+pub mod datasets;
 pub mod device;
 pub mod eval;
 pub mod generate;

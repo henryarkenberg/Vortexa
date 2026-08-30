@@ -13,6 +13,8 @@ serde_json = "1"
 indicatif = "0.17"
 ratatui = "0.26"
 crossterm = "0.27"
+ureq = "2"
+parquet = { version = "53", default-features = false, features = ["snap", "flate2", "zstd", "brotli"] }
 
 candle-core = "0.9"
 candle-nn = "0.9"

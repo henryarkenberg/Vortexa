@@ -17,10 +17,12 @@ $Zip = "dist\vortexa-$Version-windows-x64.zip"
 
 Remove-Item -Recurse -Force $Dir, $Zip -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $Dir | Out-Null
+New-Item -ItemType Directory -Force "$Dir\data" | Out-Null
 
 Copy-Item $Exe "$Dir\vortexa.exe"
 Copy-Item "README.md" $Dir
 Copy-Item "LICENSE" $Dir
+Copy-Item "data\.gitkeep" "$Dir\data\.gitkeep"
 
 Compress-Archive -Path "$Dir\*" -DestinationPath $Zip
 Write-Host "Packed: $Zip"
