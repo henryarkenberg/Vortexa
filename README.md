@@ -1,14 +1,7 @@
+<img width="1280" height="640" alt="VORTEXA" src="https://github.com/user-attachments/assets/1ba0e617-b03c-4727-be94-a2e6871b8d35" />
 # Vortexa
 
-```
-      ##  ##  ####  ####   ###### ###### ##  ##  ###
-      ##  ## #    # #   #    ##   #      ##  ## #    #
-      ##  ## #    # ####     ##   #####    ##   ######
-       ## ## #    # #  #     ##   #      ##  ## #    #
-        ###   ####  #   #    ##   ###### ##  ## #    #
-                           v0.2.0
-      a tiny RetNet language model · CPU / GPU · Rust
-```
+Created By TheArkenberg (in collaboration with DeepseekV4)
 
 Vortexa is a small language model you can train on your own text. It is
 built on a RetNet, which is a modern attention-free architecture for
