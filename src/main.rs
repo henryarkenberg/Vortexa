@@ -9,7 +9,7 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use vortexa::config::Config;
@@ -26,12 +26,19 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// CLI subcommand variants differ a lot in size (Train holds many flags); the
+// enum is parsed once at startup so the memory cost is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Train a model on raw text (byte-level tokens).
     Train {
         /// Path to the training text file.
         #[arg(long)]
         data: PathBuf,
+        /// Optional JSON file defining the model architecture. Takes full
+        /// precedence over the --d-model/--layers/... flags.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Output directory for checkpoints.
         #[arg(long, default_value = "checkpoints")]
         out: PathBuf,
@@ -145,7 +152,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        None => vortexa::ui::run()?,
+        None => vortexa::tui::run()?,
         Some(Command::Eval {
             checkpoint,
             data,
@@ -177,6 +184,7 @@ fn main() -> Result<()> {
             resume,
             warmup,
             clip,
+            config: config_path,
             d_model,
             layers,
             heads,
@@ -189,19 +197,35 @@ fn main() -> Result<()> {
             num_merges,
             device,
         }) => {
-            let config = Config {
-                vocab_size: 256,
-                d_model,
-                num_layers: layers,
-                num_heads: heads,
-                head_dim,
-                ffn_dim: ffn,
-                max_seq_len: seq_len,
-                decay_min,
-                decay_max,
-                chunk_len: chunk,
-                tokenizer,
-                num_merges,
+            // A --config JSON file takes full precedence over the individual
+            // --d-model/--layers/... flags, so users can define the whole
+            // network by hand.
+            let config = match &config_path {
+                Some(path) => {
+                    let text = std::fs::read_to_string(path).with_context(|| {
+                        format!("reading config file {}", path.display())
+                    })?;
+                    let cfg: Config =
+                        serde_json::from_str(&text).with_context(|| {
+                            format!("parsing config file {}", path.display())
+                        })?;
+                    cfg.validate()?;
+                    cfg
+                }
+                None => Config {
+                    vocab_size: 256,
+                    d_model,
+                    num_layers: layers,
+                    num_heads: heads,
+                    head_dim,
+                    ffn_dim: ffn,
+                    max_seq_len: seq_len,
+                    decay_min,
+                    decay_max,
+                    chunk_len: chunk,
+                    tokenizer,
+                    num_merges,
+                },
             };
             vortexa::train::run(vortexa::train::TrainArgs {
                 data,

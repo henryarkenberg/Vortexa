@@ -1,0 +1,14 @@
+{
+  "vocab_size": 256,
+  "d_model": 128,
+  "num_layers": 2,
+  "num_heads": 4,
+  "head_dim": 32,
+  "ffn_dim": 512,
+  "max_seq_len": 256,
+  "decay_min": 0.9,
+  "decay_max": 0.995,
+  "chunk_len": 64,
+  "tokenizer": "bytes",
+  "num_merges": 512
+}

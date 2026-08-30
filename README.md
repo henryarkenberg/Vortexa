@@ -32,19 +32,25 @@ every line of the math in `src/retention.rs` and change it.
 
 ## How it looks
 
-Run it and you get a friendly menu:
+Run it and you get a full-screen terminal app (built with Ratatui). The main
+menu shows the VORTEXA banner, and you move with the arrow keys or j/k and
+press Enter to choose:
 
-```
-  ╭──── VORTEXA ─────╮
-  │ [1] Train        │
-  │ [2] Continue     │
-  │ [3] Chat / Ask   │
-  │ [4] Evaluate     │
-  │ [5] Device : CPU │
-  │ [6] About        │
-  │ [0] Exit         │
-  ╰──────────────────╯
-```
+- **Train** - enter your data file and step count, then watch a live gauge
+- **Continue** - resume training from a checkpoint
+- **Chat / Ask** - type a question, get an answer in the Q&A format you trained
+- **Evaluate** - links out to the deterministic perplexity command
+- **Settings** - edit the architecture, tokenizer, training and chat options.
+  The first row, **Model template**, cycles through size presets (tiny ~0.5M,
+  small ~2.8M, medium ~7M, large ~17M) so you can train bigger models easily.
+- **Device** - cycles auto / cpu / cuda / metal
+- **About** - version and a short summary
+
+The training screen draws a real-time progress gauge with step, loss and
+tokens per second, and you stop it with Esc. The chat view auto-scrolls to
+the newest message. Your chosen settings are saved to `settings.json` and
+reloaded next time. On terminals that cannot do a full-screen TUI it falls
+back to a plain line-based menu.
 
 ## Install
 
@@ -107,6 +113,7 @@ Useful options:
 | `--seq-len` | context length | 256 |
 | `--lr` | peak learning rate | 1e-3 |
 | `--device` | `auto`, `cpu`, `cuda`, `metal` | `auto` |
+| `--config` | a JSON file defining the whole architecture | *(none)* |
 
 Checkpoints are saved to the directory you choose (default `checkpoints`) as
 `model.safetensors` plus `model_config.json` and `bpe.json`. Training
@@ -116,6 +123,62 @@ option `[2] Continue`.
 The included `data/input.txt` is a copy of Tiny Shakespeare so the example
 works immediately. Any text file is fine, and the menu accepts a path to
 anywhere.
+
+## Choose your own architecture
+
+The network is not fixed to one size. You can make it as big or as small as
+you want, either with individual flags or with a config file.
+
+With flags:
+
+```bash
+cargo run --release -- train --data books.txt \
+  --d-model 512 --layers 6 --heads 16 --head-dim 32 --ffn 1024 \
+  --num-merges 1024 --steps 10000
+```
+
+Or with a JSON config file that defines every number:
+
+```bash
+cargo run --release -- train --data books.txt --config examples/large.json
+```
+
+The file takes full precedence over the flags. Two ready-made examples live
+in `examples/`:
+
+- `examples/small.json` — about 0.5M parameters, quick on any laptop
+- `examples/large.json` — about 17M parameters, needs more time and memory
+
+The whole `Config` shape is:
+
+```json
+{
+  "vocab_size": 256,
+  "d_model": 512,
+  "num_layers": 6,
+  "num_heads": 16,
+  "head_dim": 32,
+  "ffn_dim": 1024,
+  "max_seq_len": 512,
+  "decay_min": 0.9,
+  "decay_max": 0.995,
+  "chunk_len": 64,
+  "tokenizer": "bpe",
+  "num_merges": 1024
+}
+```
+
+Notes on the fields:
+
+- `d_model` must equal `num_heads * head_dim`.
+- `tokenizer` is `bytes` (vocab stays 256) or `bpe` (vocab becomes
+  `256 + num_merges` when you train).
+- `chunk_len` controls chunkwise retention. Leave it around 64.
+- `decay_min` / `decay_max` set the starting decay range; each head learns
+  its own decay after that.
+
+Whatever you choose is stored in `model_config.json`, so `generate` and
+`eval` load the exact same architecture later.
 
 ## Q&A: making it answer questions
 

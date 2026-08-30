@@ -2,6 +2,8 @@
 //! cross-entropy -> AdamW step, with periodic validation + checkpoints.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -10,6 +12,22 @@ use candle_nn::{Optimizer, VarBuilder, VarMap};
 use rand::{rngs::StdRng, SeedableRng};
 
 use crate::bpe::BpeTokenizer;
+
+/// Live progress reported during training, shared with a TUI front end.
+#[derive(Clone, Copy, Debug)]
+pub struct TrainProgress {
+    pub step: usize,
+    pub total: usize,
+    pub loss: f32,
+    pub tok_s: f64,
+    pub done: bool,
+}
+
+impl Default for TrainProgress {
+    fn default() -> Self {
+        Self { step: 0, total: 0, loss: 0.0, tok_s: 0.0, done: false }
+    }
+}
 use crate::config::Config;
 use crate::data::ByteDataset;
 use crate::model::Vortexa;
@@ -151,7 +169,26 @@ impl TrainBar {
     }
 }
 
+/// Run a full training loop, drawing the indicatif bar to the terminal.
 pub fn run(args: TrainArgs) -> Result<()> {
+    run_inner(args, None, Arc::new(AtomicBool::new(false)))
+}
+
+/// Run a full training loop while reporting progress to the TUI. The loop
+/// stops early if `cancel` is set (checked each step).
+pub fn run_with_progress(
+    args: TrainArgs,
+    progress: Arc<Mutex<TrainProgress>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
+    run_inner(args, Some(progress), cancel)
+}
+
+fn run_inner(
+    args: TrainArgs,
+    progress: Option<Arc<Mutex<TrainProgress>>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
     args.config.validate()?;
     anyhow::ensure!(
         args.seq_len <= args.config.max_seq_len,
@@ -162,7 +199,12 @@ pub fn run(args: TrainArgs) -> Result<()> {
 
     let device = crate::device::pick_device(&args.device)?;
     let device_name = crate::device::describe(&device);
-    println!("device: {device_name}");
+    // When a TUI is drawing the progress itself, keep stdout silent so the
+    // alternate screen is not corrupted by stray prints.
+    let verbose = progress.is_none();
+    if verbose {
+        println!("device: {device_name}");
+    }
 
     // Build the tokenizer if requested, then convert raw bytes to token ids.
     let mut config = args.config.clone();
@@ -180,21 +222,25 @@ pub fn run(args: TrainArgs) -> Result<()> {
         });
         let tok = match cached {
             Some(tok) => {
-                println!(
-                    "reusing BPE tokenizer: {} merges -> vocab {}",
-                    tok.num_merges(),
-                    tok.vocab_size()
-                );
+                if verbose {
+                    println!(
+                        "reusing BPE tokenizer: {} merges -> vocab {}",
+                        tok.num_merges(),
+                        tok.vocab_size()
+                    );
+                }
                 tok
             }
             None => {
                 let raw = ByteDataset::read_bytes(&args.data)?;
                 let tok = BpeTokenizer::train(&raw, config.num_merges);
-                println!(
-                    "BPE tokenizer: {} merges -> vocab {}",
-                    tok.num_merges(),
-                    tok.vocab_size()
-                );
+                if verbose {
+                    println!(
+                        "BPE tokenizer: {} merges -> vocab {}",
+                        tok.num_merges(),
+                        tok.vocab_size()
+                    );
+                }
                 tok
             }
         };
@@ -221,13 +267,15 @@ pub fn run(args: TrainArgs) -> Result<()> {
         val_ds.len(),
         args.seq_len
     );
-    println!(
-        "dataset: {} total | train {} | val {} tokens{}",
-        train_ds.len() + val_ds.len(),
-        train_ds.len(),
-        val_ds.len(),
-        if config.tokenizer == "bpe" { " (BPE)" } else { " (bytes)" }
-    );
+    if verbose {
+        println!(
+            "dataset: {} total | train {} | val {} tokens{}",
+            train_ds.len() + val_ds.len(),
+            train_ds.len(),
+            val_ds.len(),
+            if config.tokenizer == "bpe" { " (BPE)" } else { " (bytes)" }
+        );
+    }
 
     let mut varmap = VarMap::new();
     let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
@@ -238,36 +286,42 @@ pub fn run(args: TrainArgs) -> Result<()> {
         varmap
             .load(weights.as_path())
             .with_context(|| format!("resuming weights from {}", weights.display()))?;
-        println!("resumed weights from {}", weights.display());
+        if verbose {
+            println!("resumed weights from {}", weights.display());
+        }
     }
 
     let n_params: usize = varmap.all_vars().iter().map(|v| v.elem_count()).sum();
-    println!(
-        "Vortexa: {} layers x {} heads@{}d, d_model {}, ffn {}, vocab {}",
-        config.num_layers,
-        config.num_heads,
-        config.head_dim,
-        config.d_model,
-        config.ffn_dim,
-        config.vocab_size
-    );
-    println!(
-        "parameters: {n_params} ({:.2}M) | peak lr {} | batch {} x seq {}",
-        n_params as f64 / 1e6,
-        args.lr,
-        args.batch_size,
-        args.seq_len
-    );
-    println!(
-        "schedule: {} warmup steps, cosine decay to {:.0}%, grad clip {}",
-        args.warmup_steps,
-        10.0,
-        if args.grad_clip > 0.0 {
-            format!("{:.2}", args.grad_clip)
-        } else {
-            "off".into()
-        }
-    );
+    if verbose {
+        println!(
+            "Vortexa: {} layers x {} heads@{}d, d_model {}, ffn {}, vocab {}",
+            config.num_layers,
+            config.num_heads,
+            config.head_dim,
+            config.d_model,
+            config.ffn_dim,
+            config.vocab_size
+        );
+    }
+    if verbose {
+        println!(
+            "parameters: {n_params} ({:.2}M) | peak lr {} | batch {} x seq {}",
+            n_params as f64 / 1e6,
+            args.lr,
+            args.batch_size,
+            args.seq_len
+        );
+        println!(
+            "schedule: {} warmup steps, cosine decay to {:.0}%, grad clip {}",
+            args.warmup_steps,
+            10.0,
+            if args.grad_clip > 0.0 {
+                format!("{:.2}", args.grad_clip)
+            } else {
+                "off".into()
+            }
+        );
+    }
 
     let mut opt = candle_nn::AdamW::new(
         varmap.all_vars(),
@@ -279,10 +333,20 @@ pub fn run(args: TrainArgs) -> Result<()> {
 
     let mut rng = StdRng::seed_from_u64(args.seed);
     let start = Instant::now();
-    let mut bar = TrainBar::new(args.steps);
     let tokens_per_step = (args.batch_size * args.seq_len) as u64;
+    let mut window_start = Instant::now();
+    let mut window_tokens: u64 = 0;
+    let mut ema_tok_s: f64 = 0.0;
+    let mut bar = (progress.is_none()).then(|| TrainBar::new(args.steps));
 
     for step in 1..=args.steps {
+        if cancel.load(Ordering::Relaxed) {
+            if verbose {
+                println!("training cancelled");
+            }
+            break;
+        }
+
         let (x, y) =
             train_ds.random_batch(&mut rng, args.batch_size, args.seq_len, &device)?;
         let logits = model.forward(&x)?;
@@ -296,19 +360,43 @@ pub fn run(args: TrainArgs) -> Result<()> {
         }
 
         let loss_now: f32 = loss.to_scalar()?;
-        let tps = bar.tps();
-        bar.update(
-            step,
-            tokens_per_step,
-            &format!("loss {loss_now:.3}  {:.1}k tok/s", tps / 1e3),
-        );
 
-        if step % args.log_every == 0 || step == args.steps {
-            bar.log(format!(
-                "step {step:>6}  loss {loss_now:7.4}  tok/s {:8.0}  elapsed {:6.1}s",
-                tps, 
-                start.elapsed().as_secs_f64()
-            ));
+        // Tokens/s (windowed EMA), shared by both the bar and the TUI.
+        window_tokens += tokens_per_step;
+        let dt = window_start.elapsed().as_secs_f64();
+        if dt >= 1.0 {
+            let window_tps = window_tokens as f64 / dt;
+            ema_tok_s = if ema_tok_s == 0.0 {
+                window_tps
+            } else {
+                ema_tok_s * 0.6 + window_tps * 0.4
+            };
+            window_start = Instant::now();
+            window_tokens = 0;
+        }
+        let tok_s = ema_tok_s;
+
+        if let Some(p) = &progress {
+            let mut g = p.lock().unwrap();
+            g.step = step;
+            g.total = args.steps;
+            g.loss = loss_now;
+            g.tok_s = tok_s;
+            g.done = false;
+        }
+        if let Some(b) = bar.as_mut() {
+            b.update(
+                step,
+                tokens_per_step,
+                &format!("loss {loss_now:.3}  {:.1}k tok/s", tok_s / 1e3),
+            );
+            if step % args.log_every == 0 || step == args.steps {
+                b.log(format!(
+                    "step {step:>6}  loss {loss_now:7.4}  tok/s {:8.0}  elapsed {:6.1}s",
+                    tok_s,
+                    start.elapsed().as_secs_f64()
+                ));
+            }
         }
 
         if args.val_every > 0 && step % args.val_every == 0 {
@@ -321,7 +409,9 @@ pub fn run(args: TrainArgs) -> Result<()> {
                 args.seq_len,
                 &device,
             )?;
-            bar.log(format!("         val loss {vl:7.4}"));
+            if let Some(b) = bar.as_ref() {
+                b.log(format!("         val loss {vl:7.4}"));
+            }
         }
 
         if args.save_every > 0 && (step % args.save_every == 0 || step == args.steps) {
@@ -329,12 +419,21 @@ pub fn run(args: TrainArgs) -> Result<()> {
                 .with_context(|| format!("checkpointing at step {step}"))?;
         }
     }
-    bar.finish();
 
-    println!(
-        "done. checkpoint saved to {}",
-        args.out_dir.join("model.safetensors").display()
-    );
+    if let Some(p) = &progress {
+        let mut g = p.lock().unwrap();
+        g.done = true;
+    }
+    if let Some(b) = bar.as_ref() {
+        b.finish();
+    }
+
+    if verbose {
+        println!(
+            "done. checkpoint saved to {}",
+            args.out_dir.join("model.safetensors").display()
+        );
+    }
     Ok(())
 }
 

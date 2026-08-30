@@ -22,7 +22,9 @@ pub mod eval;
 pub mod generate;
 pub mod model;
 pub mod retention;
+pub mod settings;
 pub mod train;
+pub mod tui;
 pub mod ui;
 
 pub use crate::config::Config;
