@@ -1,28 +1,18 @@
-//! Vortexa: a tiny byte-level / BPE RetNet language model (Rust + Candle, CPU).
+//! Vortexa CLI: train, chat, and evaluate a tiny RetNet language model.
 //!
+//!   cargo run --release --           # interactive menu
 //!   cargo run --release -- train --data data/input.txt --steps 20000
-//!   cargo run --release -- generate --checkpoint checkpoints --prompt "ROMEO:"
+//!   cargo run --release -- generate --checkpoint checkpoints --prompt "Q: hello\nA:"
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-mod bpe;
-mod config;
-mod data;
-mod device;
-mod eval;
-mod generate;
-mod model;
-mod retention;
-mod train;
-mod ui;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use config::Config;
+use vortexa::config::Config;
 
 #[derive(Parser)]
 #[command(
@@ -155,7 +145,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        None => ui::run()?,
+        None => vortexa::ui::run()?,
         Some(Command::Eval {
             checkpoint,
             data,
@@ -163,7 +153,7 @@ fn main() -> Result<()> {
             val_frac,
             device,
         }) => {
-            crate::eval::run(crate::eval::EvalArgs {
+            vortexa::eval::run(vortexa::eval::EvalArgs {
                 checkpoint,
                 data,
                 seq_len,
@@ -213,7 +203,7 @@ fn main() -> Result<()> {
                 tokenizer,
                 num_merges,
             };
-            train::run(train::TrainArgs {
+            vortexa::train::run(vortexa::train::TrainArgs {
                 data,
                 out_dir: out,
                 steps,
@@ -243,7 +233,7 @@ fn main() -> Result<()> {
             device,
             seed,
         }) => {
-            generate::run(generate::GenerateArgs {
+            vortexa::generate::run(vortexa::generate::GenerateArgs {
                 checkpoint,
                 prompt,
                 template,

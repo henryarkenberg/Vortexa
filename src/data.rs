@@ -34,6 +34,10 @@ impl ByteDataset {
         self.tokens.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
     /// Split off a contiguous tail for validation. Returns `(train, val)`.
     pub fn split_tail(&self, val_frac: f64, min_val_tokens: usize) -> (Self, Self) {
         let val_len = (((self.tokens.len() as f64) * val_frac) as usize).max(min_val_tokens);

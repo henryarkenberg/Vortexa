@@ -3,3 +3,7 @@
 /checkpoints_*
 *.safetensors
 Cargo.lock.bak
+/training.log
+/training.err
+/dist
+.DS_Store

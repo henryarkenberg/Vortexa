@@ -97,10 +97,7 @@ fn banner() {
     let block_w = 6 * LETTERS.len() + (LETTERS.len() - 1);
     let left = (block_w / 2).saturating_sub(version.len() / 2);
     println!("{INDENT}{}{}", " ".repeat(left), version);
-    println!(
-        "{INDENT}{}",
-        "a tiny RetNet language model · CPU / GPU · Rust"
-    );
+    println!("{INDENT}a tiny RetNet language model · CPU / GPU · Rust");
     println!();
 }
 

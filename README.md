@@ -1,124 +1,242 @@
 # Vortexa
 
-A tiny byte-level **RetNet** language model in Rust + [Candle](https://github.com/huggingface/candle).
-CPU-only, ~0.5M parameters by default, no attention anywhere — the only
-sequence-mixing mechanism is retention:
-
-```text
-S_t = gamma * S_{t-1} + outer(k_t, v_t)   // recurrent state with decayed memory
-y_t = (q_t . S_t) / sqrt(head_dim)        // read-out
+```
+      ##  ##  ####  ####   ###### ###### ##  ##  ###
+      ##  ## #    # #   #    ##   #      ##  ## #    #
+      ##  ## #    # ####     ##   #####    ##   ######
+       ## ## #    # #  #     ##   #      ##  ## #    #
+        ###   ####  #   #    ##   ###### ##  ## #    #
+                           v0.2.0
+      a tiny RetNet language model · CPU / GPU · Rust
 ```
 
-- **Training**: retention unrolled over the whole sequence (`forward_sequence`)
-- **Generation**: one token at a time, carrying `layer x head` states forward
-  (`forward_step`) — no KV cache, no prefix recomputation, and no context-length
-  limit at inference
+Vortexa is a small language model you can train on your own text. It is
+built on a RetNet, which is a modern attention-free architecture for
+sequence models. Instead of computing attention, a RetNet keeps a compact
+recurrent state, which makes training long contexts cheaper and generation
+constant time, with no key-value cache.
 
-## Layout
+The whole model is around 3M parameters. It fits comfortably on a normal
+laptop and trains at thousands of tokens per second on CPU. It is a research
+lab rather than a production chatbot, and that is the point. You can read
+every line of the math in `src/retention.rs` and change it.
 
-```text
-src/
-├── main.rs        CLI (train / generate)
-├── config.rs      architecture config (serde-serializable)
-├── data.rs        byte-level dataset + batch sampler
-├── retention.rs   RetentionHead, MultiScaleRetention, RetentionState (+ tests)
-├── model.rs       RMSNorm blocks, FeedForward, RetNetBlock, Vortexa (+ tests)
-├── train.rs       AdamW training loop, cross-entropy, checkpointing
-└── generate.rs    recurrent generation, greedy/temperature sampling
+## What you can do with it
+
+- Train on any plain text file you have (any `.txt`).
+- Pick bytes or BPE tokenization.
+- Choose the backend: CPU, CUDA or Metal, with automatic detection.
+- Chat with a trained model in a Q&A style ("Q: ... A:...").
+- Measure quality with a deterministic perplexity evaluator.
+- Use it as a library from your own Rust project.
+
+## How it looks
+
+Run it and you get a friendly menu:
+
+```
+  ╭──── VORTEXA ─────╮
+  │ [1] Train        │
+  │ [2] Continue     │
+  │ [3] Chat / Ask   │
+  │ [4] Evaluate     │
+  │ [5] Device : CPU │
+  │ [6] About        │
+  │ [0] Exit         │
+  ╰──────────────────╯
 ```
 
-## Usage
+## Install
 
-Run without arguments for the **interactive menu** (train / continue /
-chat-style generation with repeated prompts / checkpoint info / progress):
+### Option A: download a prebuilt binary
+
+For Windows, Linux and macOS binaries, check the Releases page of this
+repository. Each release contains a self-contained executable plus the
+license. Unzip it and run it. Nothing else is needed.
+
+- Releases: https://github.com/henryarkenberg/Vortexa/releases
+
+If your operating system is not covered by a built file, use Option B.
+
+### Option B: build from source
+
+You only need Rust (1.75 or newer, for `div_ceil` and friends).
+
+- Rust: https://rustup.rs
+
+```bash
+git clone https://github.com/henryarkenberg/Vortexa.git
+cd vortexa
+cargo build --release
+```
+
+The binary is at `target/release/vortexa`. To install it into your PATH:
+
+```bash
+cargo install --path .
+```
+
+On Windows the same commands work in PowerShell, just append `.exe` when you
+run the binary by hand.
+
+## Train on your own data
+
+### The easy way
 
 ```bash
 cargo run --release
 ```
 
-Or use the CLI directly:
+Then pick `[1] Train`, type the path of your text file (like
+`data/input.txt`), follow the prompts and watch the progress bar.
+
+### The CLI way
 
 ```bash
-cargo run --release -- train --data data/input.txt --steps 20000
-cargo run --release -- train --resume checkpoints --steps 5000        # continue training
-cargo run --release -- generate --checkpoint checkpoints --prompt "ROMEO:" --tokens 200 --temperature 0.8 --top-k 40
-cargo run --release -- eval --checkpoint checkpoints                  # deterministic perplexity
+cargo run --release -- train --data books.txt --tokenizer bpe --steps 10000
 ```
 
-Useful flags: `--seq-len`, `--batch-size`, `--lr`, `--val-every`,
-`--save-every`, and architecture overrides `--d-model/--layers/--heads/
---head-dim/--ffn/--decay-min/--decay-max`. Temperature `0` = greedy.
-Checkpoints are written as `model.safetensors` + `model_config.json`
-(the config is reloaded automatically for generation).
+Useful options:
 
-## Evaluation
+| Flag | Meaning | Default |
+|---|---|---|
+| `--data` | your text file | `data/input.txt` |
+| `--steps` | training steps | 20000 |
+| `--tokenizer` | `bpe` or `bytes` | `bpe` |
+| `--num-merges` | BPE merges (vocab = 256 + merges) | 512 |
+| `--seq-len` | context length | 256 |
+| `--lr` | peak learning rate | 1e-3 |
+| `--device` | `auto`, `cpu`, `cuda`, `metal` | `auto` |
 
-`vortexa eval --checkpoint <dir>` reports deterministic per-token
-cross-entropy and perplexity on a held-out slice of the corpus (default 5%),
-using the checkpoint's own tokenizer. Because it uses fixed, non-overlapping
-windows (no RNG), results are reproducible and directly comparable across
-configs — e.g. BPE vs bytes, model depth, chunk size, or a RetNet vs
-Transformer run. A val perplexity close to train means the model is
-underfitting; a large gap means it is overfitting.
+Checkpoints are saved to the directory you choose (default `checkpoints`) as
+`model.safetensors` plus `model_config.json` and `bpe.json`. Training
+continues from a checkpoint when you pass `--resume <dir>` or use the menu
+option `[2] Continue`.
 
-## Training speed
+The included `data/input.txt` is a copy of Tiny Shakespeare so the example
+works immediately. Any text file is fine, and the menu accepts a path to
+anywhere.
 
-Training uses **parallel retention** — `Y = ((Q K^T) ⊙ D_mask) V / √d`,
-where `D_mask[i][j] = γ^(i-j)` for `i ≥ j` — which is mathematically
-identical to unrolling the recurrence but runs as three batched matmuls.
-Together with the recurrent step used at inference, both forms are tested
-for equivalence (`src/retention.rs`). A global `mimalloc` allocator keeps
-CPU tensor churn cheap. Training shows a live progress bar on stderr
-(clean log lines still go to stdout / `training.log`).
+## Q&A: making it answer questions
 
-Best measured throughput on a laptop CPU is around **~25k tok/s** at
-batch 32 × seq 128 (~4× the naive per-step loop); larger batches throttle.
-Defaults are tuned accordingly.
+A 3M parameter model cannot reason, but it can learn the pattern of
+question and answer. Format your data that way and train:
 
-## Tokenization
+```text
+Q: What is the capital of France?
+A: Paris.
 
-Two modes, chosen with `--tokenizer`:
+Q: How many hours in a day?
+A: 24.
+```
 
-- `bytes` (default) — vocab 256, each byte is a token. Simplest, lossless.
-- `bpe` — a from-scratch byte-level BPE over `--num-merges` (default 512) merges
-  learned from the corpus (vocab grows to `256 + merges`). Common subwords
-  become single tokens, so the model packs more meaning per token and trains
-  faster per sequence. The tokenizer is trained at train time and saved as
-  `bpe.json` next to the checkpoint, so generation reloads it automatically.
+Then ask it with the default chat mode, which wraps your prompt as
+`Q: {prompt}\nA:`. You can change the template from the menu or with
+`--template "Q: {prompt}\nA:"`.
 
-## Defaults (~2.8M params)
+Expect answers that look right for simple, common patterns, and stay away
+from anything a 3M model could not have learned.
 
-| vocab | d_model | layers | heads | head_dim | ffn (SwiGLU) | context |
-|-------|---------|--------|-------|----------|--------------|---------|
-| 256   | 256     | 4      | 8     | 32       | 512          | 256     |
+## Use it in your own project
 
-A smaller `~0.5M` config also ships for quick experiments. Head decays are
-**learnable** per head (sigmoid-parameterized in `(0,1)`), seeded from the
-geometric range over the forgetting gap `(1 - gamma)` between `--decay-min`
-(0.90) and `--decay-max` (0.995). The feed-forward network is SwiGLU and each
-retention head's value is RMS-normalized per token.
+Vortexa ships both a CLI and a Rust library. Add it as a dependency in your
+`Cargo.toml`:
 
-## Tests
+```toml
+[dependencies]
+vortexa = { path = "/path/to/vortexa" }
+```
 
-The four correctness tests from the design guide live in
-`src/retention.rs` / `src/model.rs`:
+Train a model from your code:
 
-1. shape preservation through multi-head retention
-2. zero-state: first output depends only on the first K/V pair
-3. exponential state decay when K/V are zero
-4. **parallel == sequence == recurrent** (head level and full-model level)
+```rust
+use vortexa::{config::Config, train::{self, TrainArgs}};
+
+let config = Config {
+    tokenizer: "bpe".into(),
+    num_merges: 512,
+    max_seq_len: 256,
+    ..Config::larger()
+};
+
+train::run(TrainArgs {
+    data: "data.txt".into(),
+    out_dir: "checkpoints".into(),
+    steps: 10000,
+    batch_size: 16,
+    seq_len: 256,
+    lr: 1e-3,
+    log_every: 50,
+    val_every: 500,
+    val_batches: 4,
+    save_every: 1000,
+    val_frac: 0.05,
+    seed: 42,
+    resume: None,
+    warmup_steps: 200,
+    grad_clip: 1.0,
+    device: "auto".into(),
+    config,
+})?;
+```
+
+Then load a checkpoint and generate:
+
+```rust
+use rand::{rngs::StdRng, SeedableRng};
+use vortexa::{device, generate::Generator};
+
+let dev = device::pick_device("auto")?;
+let mut gen = Generator::load(std::path::Path::new("checkpoints"), &dev)?;
+let mut rng = StdRng::seed_from_u64(42);
+
+let answer = gen.complete("Q: What is 2+2?\nA:", 100, 0.4, 40, &mut rng)?;
+println!("{answer}");
+```
+
+The important public pieces are `Config`, `BpeTokenizer`, `ByteDataset`,
+`Vortexa`, `Generator`, `TrainArgs` and the `retention` module.
+
+## Evaluate
+
+A quick, reproducible number beats eyeballing:
 
 ```bash
-cargo test --release
+cargo run --release -- eval --checkpoint checkpoints
 ```
 
-## Notes & expectations
+It reports nats per token and perplexity on a held-out slice of the corpus.
+Use it to compare configs: BPE vs bytes, depth, chunk size, and so on. It is
+deterministic, so your numbers will match across machines.
 
-- Untrained loss starts near ln(vocab); for bytes that is ln(256) ≈ 5.55.
-  A default 2.8M model reaches ~3.0–3.5 nats/token on Tiny Shakespeare after
-  a few thousand steps (measured ~4–9k tok/s at batch 32 × seq 256 on a laptop
-  CPU; the ~0.5M model is several times faster).
-- Learnable multi-scale decays, chunkwise recurrent retention, SwiGLU FFN,
-  value RMSNorm, warmup + cosine LR, gradient clipping and byte/BPE
-  tokenization are implemented; planned items include weight tying and a
-  RetNet-vs-Transformer comparison benchmark.
+## What it uses
+
+Vortexa is built on small, fine pieces:
+
+- Candle, the tensor framework: https://github.com/huggingface/candle
+  - Candle examples and docs: https://github.com/huggingface/candle/blob/main/candle-examples/examples/mnist-training
+  - Candle VarBuilder docs: https://github.com/huggingface/candle/blob/main/candle-nn/src/var_builder.rs
+- The RetNet paper, "Retentive Network: A Successor to Transformer for Large
+  Language Models": https://arxiv.org/abs/2307.08621
+- Tiny Shakespeare dataset: https://github.com/karpathy/char-rnn (used only
+  as the sample `data/input.txt`)
+- indicatif for progress bars: https://github.com/console-rs/indicatif
+- mimalloc as the allocator: https://github.com/microsoft/mimalloc
+
+For the design story and the full build plan, read
+[`docs/design-guide.md`](docs/design-guide.md).
+
+## Development
+
+- Tests: `cargo test --release`
+- Lint: `cargo clippy --release -- -D warnings`
+- CI runs both on every push and pull request.
+- Package a Windows release zip: `powershell scripts\package-release.ps1`
+
+Releases with prebuilt binaries are built automatically by GitHub Actions
+when you push a tag like `v0.2.0`. See `.github/workflows/release.yml`.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Use it however you like, commercially included,
+with attribution.
