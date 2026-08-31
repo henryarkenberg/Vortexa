@@ -409,6 +409,13 @@ fn run_inner(
                     tok_s,
                     start.elapsed().as_secs_f64()
                 ));
+                // Plain stdout line too, so redirected / non-TTY runs keep a
+                // readable log even though indicatif hides its bar there.
+                println!(
+                    "step {step:>6}  loss {loss_now:7.4}  tok/s {:8.0}  elapsed {:6.1}s",
+                    tok_s,
+                    start.elapsed().as_secs_f64()
+                );
             }
         }
 

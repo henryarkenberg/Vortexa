@@ -47,7 +47,7 @@ impl Default for Settings {
             steps: 20000,
             batch_size: 16,
             seq_len: 256,
-            lr: 1e-3,
+            lr: 6e-4,
             tokenizer: "bpe".to_string(),
             num_merges: 512,
             chunk_len: 64,

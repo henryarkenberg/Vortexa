@@ -5,6 +5,30 @@ All notable changes to Vortexa are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/). This
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-08 | Correctness fix
+
+### Architecture (retention)
+- Fixed the Multi-Scale Retention to match the RetNet paper. Previously the
+  value was RMS-normalized on the *input* and the output passed through only
+  the output projection, which suppressed the retention signal and made the
+  model behave like an FFN (early loss plateau). Now the head outputs are
+  concatenated, **GroupNorm'd per head**, multiplied by a **`swish(g_proj(x))`
+  gate**, then projected out — exactly the paper's MSR.
+- Removed the extra `1/sqrt(head_dim)` read-out scale (the output GroupNorm
+  handles stability) and the value RMSNorm.
+- Moved the default decay schedule to the paper's range
+  (`0.969` → `0.9995`, was `0.90` → `0.995`), so long-range memory is kept.
+
+### Training
+- Lowered the default learning rate to `6e-4` (matches the reference RetNet
+  mini model; `1e-3` oscillated and settled higher).
+- Training now prints a plain stdout loss line, so redirected / non-TTY runs
+  (and `training.log`) stay readable even though indicatif hides its bar.
+
+### Result
+- With the fix, a 600-step bytes run reached 2.98 nats and was still
+  descending (baseline ln 256 = 5.55), instead of plateauing near 4.6.
+
 ## [0.3.0] - 2026-08 | Terminal UI era
 
 ### User experience

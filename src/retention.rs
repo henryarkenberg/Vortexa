@@ -1,30 +1,33 @@
 //! Retention: the sequence-mixing mechanism of Vortexa.
 //!
-//! This is *not* attention (no `Q K^T -> softmax -> V`). Instead each head
-//! keeps a compressed recurrent state `S: [head_dim, head_dim]` and applies:
+//! This is *not* attention (no `Q K^T -> softmax -> V`). Each head keeps a
+//! compressed recurrent state `S: [head_dim, head_dim]` and applies:
 //!
 //! ```text
 //! S_t = decay * S_{t-1} + outer(k_t, v_t)     // write, with exponential forgetting
-//! y_t = (q_t . S_t) * scale                   // read-out, scale = 1/sqrt(head_dim)
+//! y_t = q_t . S_t                             // read-out (no extra scaling)
 //! ```
 //!
-//! The per-head decay is **learnable** (a scalar in `(0,1)` via a sigmoid),
-//! and each head's value is RMS-normalized per token (a stand-in for the
-//! paper's per-head GroupNorm on the value that stays sequence-length
-//! independent). Two entry points share the same per-step recurrence:
+//! Following the RetNet paper, the head outputs are concatenated and then
+//! normalized per head, gated with `swish(g(x))`, and projected out:
 //!
-//! * [`RetentionHead::forward_sequence`] unrolls over a whole `[B, T, D]`
-//!   batch — the recurrent reference, used by tests.
-//! * [`MultiScaleRetention::forward_parallel`] runs the batched-matmul
-//!   parallel form used for training.
+//! ```text
+//! MSR(x) = out_proj( GroupNorm_h(Concat(heads)) ⊙ swish(g_proj(x)) )
+//! ```
+//!
+//! The per-head decay is a learned scalar in `(0,1)` (sigmoid parameterized).
+//! Three entry points share the same per-step recurrence and are tested to
+//! agree exactly:
+//!
+//! * [`RetentionHead::forward_sequence`] unrolls over a `[B, T, D]` batch.
+//! * [`MultiScaleRetention::forward_parallel`] runs the batched parallel form.
+//! * [`MultiScaleRetention::forward_chunkwise`] runs the chunkwise form used
+//!   for training.
 //! * [`RetentionHead::forward_step`] / [`MultiScaleRetention::forward_step`]
 //!   consume one token at a time for generation.
-//!
-//! Tests verify all three agree.
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
-use candle_nn::RmsNorm;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -96,7 +99,7 @@ fn gamma_reverse(log_gamma: &Tensor, c: usize, device: &Device) -> Result<Tensor
         .exp()
 }
 
-/// Within-chunk parallel retention (no read-out scale): `[B, C, d] -> [B, C, d]`.
+/// Within-chunk parallel retention (raw, no output scale): `[B, C, d] -> [B, C, d]`.
 fn chunk_intra(
     q: &Tensor,
     k: &Tensor,
@@ -121,7 +124,6 @@ fn chunk_sequence(
     v: &Tensor,
     log_gamma: &Tensor,
     chunk_len: usize,
-    scale: f64,
     device: &Device,
 ) -> Result<Tensor> {
     let (b, t, d) = q.dims3()?;
@@ -144,8 +146,7 @@ fn chunk_sequence(
         let prefix = qc
             .matmul(&state)? // q_r . S_in -> [B, c, d]
             .broadcast_mul(&row_scale.unsqueeze(0)?.unsqueeze(2)?)?;
-        let y = intra.add(&prefix)?.affine(scale, 0.0)?; // [B, c, d]
-        outs.push(y);
+        outs.push(intra.add(&prefix)?); // [B, c, d]
 
         // State update:
         //   S_out = γ^c S_in + Σ_r γ^{c-1-r} k_r v_r^T
@@ -163,11 +164,6 @@ fn chunk_sequence(
     Tensor::cat(&refs, 1)
 }
 
-/// Read-out scale that keeps activation magnitudes stable.
-pub fn retention_scale(head_dim: usize) -> f64 {
-    1.0 / (head_dim as f64).sqrt()
-}
-
 /// logit(x) = ln(x / (1 - x)) — maps a decay in (0,1) to a raw head param.
 pub fn logit(p: f64) -> f64 {
     (p / (1.0 - p)).ln()
@@ -178,7 +174,8 @@ pub fn sigmoid(x: &Tensor) -> Result<Tensor> {
     x.neg()?.exp()?.affine(1.0, 1.0)?.recip()
 }
 
-/// One step of the shared retention recurrence.
+/// One step of the shared retention recurrence (no output scaling; the block
+/// applies per-head GroupNorm and the gate afterwards).
 ///
 /// * `q`, `k`, `v`: `[B, H]`
 /// * `state`: `[B, H, H]`, rebound to the updated tensor
@@ -190,17 +187,13 @@ pub fn retention_step(
     v: &Tensor,
     state: &mut Tensor,
     decay: &Tensor,
-    scale: f64,
 ) -> Result<Tensor> {
     // Rank-1 write: outer(k, v) -> [B, H, H]
     let kv = k.unsqueeze(2)?.broadcast_mul(&v.unsqueeze(1)?)?;
     let updated = state.broadcast_mul(decay)?.add(&kv)?;
     *state = updated;
     // Read-out: q . S -> [B, H]
-    q.unsqueeze(1)?
-        .matmul(state)?
-        .squeeze(1)?
-        .affine(scale, 0.0)
+    q.unsqueeze(1)?.matmul(state)?.squeeze(1)
 }
 
 /// Recurrent state of a single head: `[batch, head_dim, head_dim]`.
@@ -217,16 +210,15 @@ impl RetentionState {
     }
 }
 
-/// A single retention head: projections, a per-token value norm and a
-/// learnable decay.
+/// A single retention head: Q/K/V projections and a learnable decay. The head
+/// produces the *raw* retention output; normalization/gating happen later in
+/// [`MultiScaleRetention`].
 #[derive(Debug)]
 pub struct RetentionHead {
     pub(crate) wq: Linear,
     pub(crate) wk: Linear,
     pub(crate) wv: Linear,
     pub(crate) log_gamma: Tensor,
-    pub(crate) vnorm: RmsNorm,
-    pub(crate) scale: f64,
 }
 
 impl RetentionHead {
@@ -242,8 +234,6 @@ impl RetentionHead {
             wk: candle_nn::linear_no_bias(d_model, head_dim, vs.pp("wk"))?,
             wv: candle_nn::linear_no_bias(d_model, head_dim, vs.pp("wv"))?,
             log_gamma: vs.get_with_hints((), "log_gamma", candle_nn::Init::Const(logit(init_decay)))?,
-            vnorm: candle_nn::rms_norm(head_dim, 1e-5, vs.pp("vnorm"))?,
-            scale: retention_scale(head_dim),
         })
     }
 
@@ -252,20 +242,14 @@ impl RetentionHead {
         sigmoid(&self.log_gamma)
     }
 
-    /// Projected + value-normalized tensor for `x: [B, T, d_model]`.
-    fn values(&self, x: &Tensor) -> Result<Tensor> {
-        self.vnorm.forward(&self.wv.forward(x)?)
-    }
-
     /// Unrolled processing of a full sequence: `[B, T, d_model] -> [B, T, head_dim]`.
     pub fn forward_sequence(&self, x: &Tensor) -> Result<Tensor> {
         let (b, t, _) = x.dims3()?;
         let q = self.wq.forward(x)?;
         let k = self.wk.forward(x)?;
-        let v = self.values(x)?;
+        let v = self.wv.forward(x)?;
         let gamma = self.decay()?;
-        let mut state =
-            Tensor::zeros((b, q.dim(2)?, k.dim(2)?), DType::F32, x.device())?;
+        let mut state = Tensor::zeros((b, q.dim(2)?, k.dim(2)?), DType::F32, x.device())?;
         let mut outs: Vec<Tensor> = Vec::with_capacity(t);
         for ti in 0..t {
             let y = retention_step(
@@ -274,7 +258,6 @@ impl RetentionHead {
                 &v.narrow(1, ti, 1)?.squeeze(1)?,
                 &mut state,
                 &gamma,
-                self.scale,
             )?;
             outs.push(y.unsqueeze(1)?);
         }
@@ -287,19 +270,23 @@ impl RetentionHead {
     pub fn forward_step(&self, x: &Tensor, state: &mut RetentionState) -> Result<Tensor> {
         let q = self.wq.forward(x)?.squeeze(1)?;
         let k = self.wk.forward(x)?.squeeze(1)?;
-        let v = self.values(x)?.squeeze(1)?;
+        let v = self.wv.forward(x)?.squeeze(1)?;
         let gamma = self.decay()?;
-        let y = retention_step(&q, &k, &v, &mut state.s, &gamma, self.scale)?;
+        let y = retention_step(&q, &k, &v, &mut state.s, &gamma)?;
         y.unsqueeze(1)
     }
 }
 
-/// Multi-scale retention: heads with learnable decays + output projection.
+/// Multi-scale retention: per-head retention followed by per-head GroupNorm,
+/// a `swish` gate, and the output projection — exactly the paper's MSR.
 #[derive(Debug)]
 pub struct MultiScaleRetention {
     heads: Vec<RetentionHead>,
-    wo: Linear,
+    g_proj: Linear,
+    out_proj: Linear,
+    gn_weight: Tensor, // [num_heads, head_dim], per-head scale for the GroupNorm
     head_dim: usize,
+    eps: f64,
 }
 
 impl MultiScaleRetention {
@@ -325,21 +312,38 @@ impl MultiScaleRetention {
         }
         Ok(Self {
             heads,
-            wo: candle_nn::linear_no_bias(num_heads * head_dim, d_model, vs.pp("wo"))?,
+            g_proj: candle_nn::linear_no_bias(d_model, d_model, vs.pp("g_proj"))?,
+            out_proj: candle_nn::linear_no_bias(d_model, d_model, vs.pp("out_proj"))?,
+            gn_weight: vs.get_with_hints(
+                (num_heads, head_dim),
+                "gn_weight",
+                candle_nn::Init::Const(1.0),
+            )?,
             head_dim,
+            eps: 1e-5,
         })
     }
 
-    /// Parallel retention (used as the training fast path when `chunk_len`
-    /// covers the whole sequence; kept as a reference otherwise):
-    ///
-    /// ```text
-    /// Y = ((Q K^T) ⊙ D_mask) V / sqrt(head_dim)
-    /// ```
-    ///
-    /// where `D_mask[i][j] = γ_h^(i-j)` for `i >= j`, built per head from its
-    /// learnable decay. Mathematically identical to unrolling `retention_step`,
-    /// but computed with three batched matmuls.
+    /// Per-head GroupNorm on the concatenated heads `[B, T, h*d] -> [B, T, h*d]`:
+    /// each head's `head_dim` channels are RMS-normalized per position.
+    fn head_norm(&self, x: &Tensor) -> Result<Tensor> {
+        let (b, t, d) = x.dims3()?;
+        let h = self.heads.len();
+        let hd = self.head_dim;
+        let r = x.reshape((b, t, h, hd))?;
+        let rms = r.sqr()?.mean_keepdim(candle_core::D::Minus1)?.affine(1.0, self.eps)?.sqrt()?;
+        let normed = r.broadcast_div(&rms)?;
+        normed.broadcast_mul(&self.gn_weight)?.reshape((b, t, d))
+    }
+
+    /// `GroupNorm(heads) ⊙ swish(g(x))` then `out_proj`.
+    fn gate_and_out(&self, merged: &Tensor, x: &Tensor) -> Result<Tensor> {
+        let normed = self.head_norm(merged)?;
+        let gated = normed.broadcast_mul(&self.g_proj.forward(x)?.silu()?)?;
+        self.out_proj.forward(&gated)
+    }
+
+    /// Parallel retention: `((Q K^T) ⊙ D_mask) V`, then norm + gate + out.
     #[allow(dead_code)]
     pub fn forward_parallel(&self, x: &Tensor) -> Result<Tensor> {
         let (b, t, _) = x.dims3()?;
@@ -352,7 +356,7 @@ impl MultiScaleRetention {
         for head in &self.heads {
             qs.push(head.wq.forward(x)?);
             ks.push(head.wk.forward(x)?);
-            vs.push(head.values(x)?);
+            vs.push(head.wv.forward(x)?);
         }
         let q = stack_dim1(&qs)?; // [B, h, T, d]
         let k = stack_dim1(&ks)?;
@@ -372,43 +376,32 @@ impl MultiScaleRetention {
 
         let y = scores
             .broadcast_mul(&masks.unsqueeze(0)?)? // decay-weighted causal scores
-            .matmul(&v)? // [B, h, T, d]
-            .affine(self.heads[0].scale, 0.0)?;
-        // Merge heads: [B, h, T, d] -> [B, T, h*d]
-        let merged = y
-            .transpose(1, 2)?
-            .reshape((b, t, n_heads * self.head_dim))?;
-        self.wo.forward(&merged)
+            .matmul(&v)?; // [B, h, T, d]
+
+        let merged = y.transpose(1, 2)?.reshape((b, t, n_heads * self.head_dim))?;
+        self.gate_and_out(&merged, x)
     }
 
     /// Chunkwise recurrent retention (`[B, T, d_model] -> [B, T, d_model]`).
-    ///
-    /// Splits the sequence into chunks of `chunk_len`; within a chunk it uses
-    /// the parallel form (a small `chunk_len × chunk_len` score matrix) and
-    /// between chunks it carries the recurrent state forward. This grows like
-    /// `O(T·chunk_len)` instead of the full parallel form's `O(T²)`, making
-    /// longer contexts affordable. Mathematically identical to the recurrent
-    /// path.
     pub fn forward_chunkwise(&self, x: &Tensor, chunk_len: usize) -> Result<Tensor> {
         let (b, t, _) = x.dims3()?;
         let n_heads = self.heads.len();
         let device = x.device();
-        let scale = self.heads[0].scale;
         let chunk_len = chunk_len.max(1).min(t);
 
         let mut per_head: Vec<Tensor> = Vec::with_capacity(n_heads);
         for head in &self.heads {
             let q = head.wq.forward(x)?;
             let k = head.wk.forward(x)?;
-            let v = head.values(x)?;
+            let v = head.wv.forward(x)?;
             let log_gamma = head.decay()?.log()?;
-            per_head.push(chunk_sequence(&q, &k, &v, &log_gamma, chunk_len, scale, device)?);
+            per_head.push(chunk_sequence(&q, &k, &v, &log_gamma, chunk_len, device)?);
         }
 
         let merged = stack_dim1(&per_head)? // [B, h, T, d]
             .transpose(1, 2)?
             .reshape((b, t, n_heads * self.head_dim))?; // [B, T, h*d]
-        self.wo.forward(&merged)
+        self.gate_and_out(&merged, x)
     }
 
     /// Reference recurrent implementation (kept for testing/equivalence):
@@ -420,7 +413,8 @@ impl MultiScaleRetention {
             outs.push(head.forward_sequence(x)?);
         }
         let refs: Vec<&Tensor> = outs.iter().collect();
-        self.wo.forward(&Tensor::cat(&refs, candle_core::D::Minus1)?)
+        let merged = Tensor::cat(&refs, candle_core::D::Minus1)?; // [B, T, h*d]
+        self.gate_and_out(&merged, x)
     }
 
     /// `[B, 1, d_model] -> [B, 1, d_model]`, advancing one state per head.
@@ -435,14 +429,14 @@ impl MultiScaleRetention {
             outs.push(head.forward_step(x, state)?);
         }
         let refs: Vec<&Tensor> = outs.iter().collect();
-        self.wo.forward(&Tensor::cat(&refs, candle_core::D::Minus1)?)
+        let merged = Tensor::cat(&refs, candle_core::D::Minus1)?; // [B, 1, h*d]
+        self.gate_and_out(&merged, x)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_nn::VarMap;
 
     fn cpu() -> Device {
         Device::Cpu
@@ -464,13 +458,25 @@ mod tests {
         Linear::new(w, None)
     }
 
-    /// RMSNorm whose weight initializes to 1 (unlike `VarBuilder::zeros`,
-    /// which would zero it and collapse the values to nothing).
-    fn vnorm(head_dim: usize) -> RmsNorm {
-        let vm = VarMap::new();
-        let vs = VarBuilder::from_varmap(&vm, DType::F32, &cpu());
-        candle_nn::rms_norm(head_dim, 1e-5, vs).unwrap()
+    fn head(gamma: f64) -> RetentionHead {
+        let d_head = 8usize;
+        let vs = VarBuilder::zeros(DType::F32, &cpu());
+        RetentionHead::new(vs, 16, d_head, gamma).unwrap()
     }
+
+    fn msr(decays: &[f64]) -> MultiScaleRetention {
+        let (d_model, head_dim) = (16usize, 8usize);
+        let heads: Vec<RetentionHead> = decays.iter().map(|g| head(*g)).collect();
+        MultiScaleRetention {
+            heads,
+            g_proj: random_linear(d_model, d_model),
+            out_proj: random_linear(d_model, d_model),
+            gn_weight: Tensor::ones((decays.len(), head_dim), DType::F32, &cpu()).unwrap(),
+            head_dim,
+            eps: 1e-5,
+        }
+    }
+
     /// Guide test 4 (core): sequence-mode, recurrent-mode and parallel form
     /// all agree.
     #[test]
@@ -481,24 +487,22 @@ mod tests {
             wk: random_linear(d_model, head_dim),
             wv: random_linear(d_model, head_dim),
             log_gamma: Tensor::new(logit(g) as f32, &cpu()).unwrap(),
-            vnorm: vnorm(head_dim),
-            scale: retention_scale(head_dim),
         };
-        let decays = [0.90f64, 0.95, 0.99];
+        let decays = [0.90f64, 0.95];
         let msr = MultiScaleRetention {
             heads: decays.iter().map(|g| mk(*g)).collect(),
-            wo: random_linear(head_dim * decays.len(), d_model),
+            g_proj: random_linear(d_model, d_model),
+            out_proj: random_linear(d_model, d_model),
+            gn_weight: Tensor::ones((decays.len(), head_dim), DType::F32, &cpu()).unwrap(),
             head_dim,
+            eps: 1e-5,
         };
         let x = randn((batch, seq_len, d_model));
 
         let par = msr.forward_parallel(&x).unwrap();
         let seq = msr.forward_sequence(&x).unwrap();
         assert_eq!(par.dims3().unwrap(), (batch, seq_len, d_model));
-        assert!(
-            max_abs_diff(&par, &seq) < 1e-4,
-            "parallel vs sequence diverged"
-        );
+        assert!(max_abs_diff(&par, &seq) < 1e-4, "parallel vs sequence diverged");
 
         // Recurrent reference on head 0 only.
         let head0 = &msr.heads[0];
@@ -522,24 +526,13 @@ mod tests {
     #[test]
     fn chunkwise_matches_parallel_and_recurrent() {
         let (d_model, head_dim, batch, seq_len) = (16usize, 8usize, 2usize, 24usize);
-        let mk = |g| RetentionHead {
-            wq: random_linear(d_model, head_dim),
-            wk: random_linear(d_model, head_dim),
-            wv: random_linear(d_model, head_dim),
-            log_gamma: Tensor::new(logit(g) as f32, &cpu()).unwrap(),
-            vnorm: vnorm(head_dim),
-            scale: retention_scale(head_dim),
-        };
-        let decays = [0.90f64, 0.95, 0.99];
-        let msr = MultiScaleRetention {
-            heads: decays.iter().map(|g| mk(*g)).collect(),
-            wo: random_linear(head_dim * decays.len(), d_model),
-            head_dim,
-        };
+        let decays = [0.90f64, 0.95];
+        let msr = msr(&decays);
+        let _ = (d_model, head_dim, batch);
         let x = randn((batch, seq_len, d_model));
 
         let par = msr.forward_parallel(&x).unwrap();
-        let chunk = msr.forward_chunkwise(&x, 5).unwrap(); // 5 chunks of seq 24
+        let chunk = msr.forward_chunkwise(&x, 5).unwrap();
         let seq = msr.forward_sequence(&x).unwrap();
 
         assert!(max_abs_diff(&chunk, &par) < 1e-3, "chunkwise vs parallel");
@@ -550,7 +543,7 @@ mod tests {
     /// and recurrent paths).
     #[test]
     fn multi_scale_shapes_are_preserved() {
-        let vm = VarMap::new();
+        let vm = candle_nn::VarMap::new();
         let vs = VarBuilder::from_varmap(&vm, DType::F32, &cpu());
         let msr =
             MultiScaleRetention::new(vs.pp("ret"), 16, 4, 4, &[0.90, 0.95, 0.99, 0.995])
@@ -578,8 +571,6 @@ mod tests {
             wk: random_linear(d_model, head_dim),
             wv: random_linear(d_model, head_dim),
             log_gamma: Tensor::new(logit(g) as f32, &cpu()).unwrap(),
-            vnorm: vnorm(head_dim),
-            scale: retention_scale(head_dim),
         };
         let head = mk(0.9);
         let first = randn((1, 1, d_model));
@@ -613,19 +604,19 @@ mod tests {
     fn state_decays_exponentially() {
         let h = 4usize;
         let decay = Tensor::new(0.5f32, &cpu()).unwrap();
-        let scale = retention_scale(h);
         let device = cpu();
         let ones = Tensor::ones((1, h), DType::F32, &device).unwrap();
         let zeros = Tensor::zeros((1, h), DType::F32, &device).unwrap();
         let mut st = Tensor::zeros((1, h, h), DType::F32, &device).unwrap();
 
-        let y1 = retention_step(&ones, &ones, &ones, &mut st, &decay, scale).unwrap();
-        let y2 = retention_step(&ones, &zeros, &zeros, &mut st, &decay, scale).unwrap();
-        let y3 = retention_step(&ones, &zeros, &zeros, &mut st, &decay, scale).unwrap();
+        let y1 = retention_step(&ones, &ones, &ones, &mut st, &decay).unwrap();
+        let y2 = retention_step(&ones, &zeros, &zeros, &mut st, &decay).unwrap();
+        let y3 = retention_step(&ones, &zeros, &zeros, &mut st, &decay).unwrap();
 
         let to_scalar = |t: &Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
         let (a, b, c) = (to_scalar(&y1), to_scalar(&y2), to_scalar(&y3));
-        assert!((a - h as f32 * scale as f32).abs() < 1e-5);
+        // y1 = row sum of the all-ones state = h.
+        assert!((a - h as f32).abs() < 1e-5);
         assert!((b / a - 0.5).abs() < 1e-5);
         assert!((c / b - 0.5).abs() < 1e-5);
     }

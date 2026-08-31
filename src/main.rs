@@ -48,7 +48,7 @@ enum Command {
         batch_size: usize,
         #[arg(long, default_value_t = 256)]
         seq_len: usize,
-        #[arg(long, default_value_t = 1e-3)]
+        #[arg(long, default_value_t = 6e-4)]
         lr: f64,
         #[arg(long, default_value_t = 50)]
         log_every: usize,

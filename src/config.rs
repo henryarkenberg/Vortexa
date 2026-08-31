@@ -39,11 +39,13 @@ pub struct Config {
 }
 
 fn default_decay_min() -> f64 {
-    0.90
+    // Paper schedule γ = 1 - 2^{-5-i}; the shortest-memory head (i = 0).
+    0.96875
 }
 
 fn default_decay_max() -> f64 {
-    0.995
+    // Longest-memory head, near 1 so long-range memory is retained.
+    0.9995
 }
 
 fn default_chunk_len() -> usize {
